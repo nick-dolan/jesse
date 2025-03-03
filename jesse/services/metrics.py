@@ -164,9 +164,8 @@ def realized_max_drawdown(starting_balance, df_pnl):
     cumulative_balance = starting_balance + df_pnl.cumsum()
     peak_balance = cumulative_balance.cummax()
     drawdown = peak_balance - cumulative_balance
-    max_drawdown = drawdown.max()
-    peak_at_max_drawdown = peak_balance[drawdown.idxmax()]
-    result = -(max_drawdown / peak_at_max_drawdown) * 100
+    drawdown_pct = (drawdown / peak_balance) * 100
+    result = -drawdown_pct.max()
 
     return pd.Series([result])
 
