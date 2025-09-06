@@ -521,7 +521,7 @@ class Strategy(ABC):
         if self.position.is_open:
             raise Exception('cannot cancel orders when position is still open. there must be a bug somewhere.')
 
-        logger.info('cancel all remaining orders to prepare for a fresh start...')
+        logger.info(f'cancel all remaining orders of {self.symbol} to prepare for a fresh start...')
 
         self.broker.cancel_all_orders()
 
@@ -750,7 +750,7 @@ class Strategy(ABC):
 
         self._wait_until_executing_orders_are_fully_handled()
 
-        if jh.is_live() and jh.is_debugging():
+        if jh.is_live() and jh.is_debuggable('strategy_execution'):
             logger.info(f'Executing  {self.name}-{self.exchange}-{self.symbol}-{self.timeframe}')
 
         # should cancel entry?
@@ -1319,6 +1319,11 @@ class Strategy(ABC):
     def routes(self) -> List[Route]:
         from jesse.routes import router
         return router.routes
+    
+    @property
+    def data_routes(self) -> List[Route]:
+        from jesse.routes import router
+        return router.data_routes
 
     @property
     def current_route_index(self) -> int:
