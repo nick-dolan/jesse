@@ -42,6 +42,12 @@ class BinanceMain(CandleExchange):
                 response = self.session.get(url, params=params, timeout=30)
                 return response
             except (requests.exceptions.ConnectionError, OSError) as e:
+                if "ERROR 451" in str(e):
+                    raise Exception(
+                        "Access to this exchange is restricted from your location (HTTP 451). "
+                        "This is likely due to geographic restrictions imposed by the exchange. "
+                        "You may need to use a VPN to change your IP address to a permitted location."
+                    )
                 if "Cannot allocate memory" in str(e):
                     # Force garbage collection and wait
                     import gc
@@ -56,9 +62,9 @@ class BinanceMain(CandleExchange):
         dashless_symbol = jh.dashless_symbol(symbol)
 
         payload = {
-            'interval': '1d',
+            'interval': '1w',
             'symbol': dashless_symbol,
-            'limit': 1500,
+            'limit': 1000,
         }
 
         response = self._make_request(
@@ -72,8 +78,8 @@ class BinanceMain(CandleExchange):
 
         # since the first timestamp doesn't include all the 1m
         # candles, let's start since the second day then
-        first_timestamp = int(data[0][0])
-        return first_timestamp + 60_000 * 1440
+        first_timestamp = int(data[1][0])
+        return first_timestamp
 
     def fetch(self, symbol: str, start_timestamp: int, timeframe: str = '1m') -> Union[list, None]:
         end_timestamp = start_timestamp + (self.count - 1) * 60000 * jh.timeframe_to_one_minutes(timeframe)
