@@ -67,6 +67,8 @@ class Strategy(ABC):
         # # Variables used for ML calculations
         # self._ml_data_points = []  # Stores complete data points with features and labels
         # self._current_ml_point = None  # Tracks the currently open data point
+        # self._ml_model = None  # Cached loaded model (loaded once on first prediction)
+        # self._ml_scaler = None  # Cached loaded scaler (loaded once on first prediction)
 
         self._is_executing = False
         self._is_initiated = False
@@ -125,6 +127,8 @@ class Strategy(ABC):
     #         # Move this completed data point to our storage and clear the current point
     #         self._ml_data_points.append(self._current_ml_point)
     #         self._current_ml_point = None
+    #     else:
+    #         jh.debug(f"record_label('{name}') called with no open data point — did you forget to call record_features() first?")
 
     # def export_ml_data(self, directory: str = None) -> bool:
     #     """
@@ -135,23 +139,15 @@ class Strategy(ABC):
     #         directory: Optional output directory. Defaults to strategy location.
     #     """
     #     import os
+    #     import sys
     #     import csv
 
     #     try:
-    #         # Debug: Check if we have data to export
-    #         jh.debug(f"Exporting ML data - Data points: {len(self._ml_data_points)}")
-
     #         # Determine output directory
     #         if directory is None:
     #             try:
-    #                 import inspect
-    #                 frame = inspect.currentframe()
-    #                 try:
-    #                     caller_file = inspect.getfile(frame.f_back)
-    #                     directory = os.path.dirname(caller_file)
-    #                 finally:
-    #                     del frame
-    #                 jh.debug(f"Detected strategy directory: {directory}")
+    #                 module = sys.modules[self.__class__.__module__]
+    #                 directory = os.path.dirname(os.path.abspath(module.__file__))
     #             except Exception as e:
     #                 jh.debug(f"Could not determine strategy path, using cwd: {e}")
     #                 directory = os.getcwd()
@@ -160,9 +156,8 @@ class Strategy(ABC):
     #         try:
     #             ml_dir = os.path.join(directory, "ml_data")
     #             os.makedirs(ml_dir, exist_ok=True)
-    #             jh.debug(f"Using output directory: {ml_dir}")
     #         except Exception as e:
-    #             jh.debug(f"Failed to create directory {ml_dir}: {e}")
+    #             jh.debug(f"Failed to create ml_data directory: {e}")
     #             return False
 
     #         # Export data points
@@ -199,16 +194,14 @@ class Strategy(ABC):
 
     #                         writer.writerow(row)
 
-    #                 jh.debug(f"Exported {len(self._ml_data_points)} data points to {data_path}")
     #             except Exception as e:
-    #                 jh.debug(f"Failed to export data: {e}")
+    #                 jh.debug(f"Failed to export ML data: {e}")
     #                 return False
 
-    #         jh.debug("ML data export completed successfully")
     #         return True
 
     #     except Exception as e:
-    #         logger.error(f"Unexpected error during ML data export: {e}")
+    #         jh.debug(f"Unexpected error during ML data export: {e}")
     #         return False
 
     # def get_ml_prediction(self) -> dict:
@@ -227,67 +220,56 @@ class Strategy(ABC):
     #     import joblib
     #     import numpy as np
     #     import os
+    #     import sys
 
     #     # Check if we have features to predict with
     #     if self._current_ml_point is None or not self._current_ml_point['features']:
     #         raise ValueError("No features recorded for prediction. Call record_features() first.")
 
-    #     # Method 1: Try to get from the strategy's module path
+    #     # Resolve strategy directory reliably via the module registry
     #     try:
-    #         module_path = self.__class__.__module__.replace('.', '/') + '/__init__.py'
-    #         strategy_dir = os.path.dirname(os.path.abspath(module_path))
-    #     except Exception as e:
-    #         strategy_dir = None
-
-    #     # Method 2: Try current working directory
-    #     if not strategy_dir or not os.path.exists(os.path.join(strategy_dir, "svm_model.pkl")):
-    #         strategy_dir = os.getcwd()
-
-    #     # Method 3: Try parent directory if we're in __pycache__
-    #     if "__pycache__" in strategy_dir:
-    #         strategy_dir = os.path.dirname(strategy_dir)
-
-    #     # Final verification of directory
-    #     if not os.path.isdir(strategy_dir):
-    #         raise FileNotFoundError(
-    #             f"Could not determine strategy directory. Tried: {strategy_dir}. "
-    #             "Please ensure you're running from the strategy directory."
-    #         )
-
-    #     # Detailed path information
-    #     model_path = os.path.join(strategy_dir, "svm_model.pkl")
-    #     scaler_path = os.path.join(strategy_dir, "scaler.pkl")
-
-    #     # Check what files actually exist
-    #     existing_files = [f for f in os.listdir(strategy_dir) if not f.startswith('.')]
-    #     jh.debug(f"[ML DEBUG] Searching in directory: {strategy_dir}")
-    #     jh.debug(f"[ML DEBUG] Files found: {existing_files}")
-    #     jh.debug(f"[ML DEBUG] Looking for: svm_model.pkl, scaler.pkl")
-
-    #     # Verify model files exist
-    #     if not os.path.exists(model_path):
-    #         raise FileNotFoundError(
-    #             f"Model file NOT FOUND at: {model_path}\n"
-    #             f"Current directory: {os.getcwd()}\n"
-    #             f"Files in strategy dir ({strategy_dir}): {existing_files}"
-    #         )
-    #     if not os.path.exists(scaler_path):
-    #         raise FileNotFoundError(
-    #             f"Scaler file NOT FOUND at: {scaler_path}\n"
-    #             f"Current directory: {os.getcwd()}\n"
-    #             f"Files in strategy dir ({strategy_dir}): {existing_files}"
-    #         )
-
-    #     # Load model and scaler
-    #     try:
-    #         svm_model = joblib.load(model_path)
-    #         scaler = joblib.load(scaler_path)
+    #         module = sys.modules[self.__class__.__module__]
+    #         strategy_dir = os.path.dirname(os.path.abspath(module.__file__))
     #     except Exception as e:
     #         raise FileNotFoundError(
-    #             f"Failed to load model files from {strategy_dir}\n"
-    #             f"Error: {str(e)}\n"
-    #             f"Files in directory ({strategy_dir}): {existing_files}"
+    #             f"Could not determine strategy directory from module '{self.__class__.__module__}': {e}"
     #         )
+
+    #     # Load model and scaler once and cache them for the lifetime of this strategy instance
+    #     if self._ml_model is None or self._ml_scaler is None:
+    #         model_path = os.path.join(strategy_dir, "svm_model.pkl")
+    #         scaler_path = os.path.join(strategy_dir, "scaler.pkl")
+
+    #         # Check what files actually exist (for helpful error messages)
+    #         existing_files = [f for f in os.listdir(strategy_dir) if not f.startswith('.')]
+    #         jh.debug(f"[ML] Loading model from: {strategy_dir}")
+
+    #         if not os.path.exists(model_path):
+    #             raise FileNotFoundError(
+    #                 f"Model file NOT FOUND at: {model_path}\n"
+    #                 f"Current directory: {os.getcwd()}\n"
+    #                 f"Files in strategy dir ({strategy_dir}): {existing_files}"
+    #             )
+    #         if not os.path.exists(scaler_path):
+    #             raise FileNotFoundError(
+    #                 f"Scaler file NOT FOUND at: {scaler_path}\n"
+    #                 f"Current directory: {os.getcwd()}\n"
+    #                 f"Files in strategy dir ({strategy_dir}): {existing_files}"
+    #             )
+
+    #         try:
+    #             self._ml_model = joblib.load(model_path)
+    #             self._ml_scaler = joblib.load(scaler_path)
+    #             jh.debug("[ML] Model and scaler loaded and cached successfully")
+    #         except Exception as e:
+    #             raise FileNotFoundError(
+    #                 f"Failed to load model files from {strategy_dir}\n"
+    #                 f"Error: {str(e)}\n"
+    #                 f"Files in directory ({strategy_dir}): {existing_files}"
+    #             )
+
+    #     svm_model = self._ml_model
+    #     scaler = self._ml_scaler
 
     #     # Get current features
     #     current_features = self._current_ml_point['features']
