@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
 from time import sleep
 from typing import List, Dict, Union, Optional
-# import os
-# import joblib
-# import csv
+import os
+import csv
 import numpy as np
+import sys
 import jesse.helpers as jh
 import jesse.services.logger as logger
 from jesse import exceptions
@@ -19,6 +19,7 @@ from jesse.store import store
 from jesse.services.cache import cached
 from jesse.services import notifier
 from jesse.services.color import generate_unique_hex_color
+from jesse.research.ml import load_ml_model as _load_ml_model
 
 
 class Strategy(ABC):
@@ -64,11 +65,13 @@ class Strategy(ABC):
         self._add_horizontal_line_to_candle_chart_values = {}
         self._add_horizontal_line_to_extra_chart_values = {}
 
-        # # Variables used for ML calculations
-        # self._ml_data_points = []  # Stores complete data points with features and labels
-        # self._current_ml_point = None  # Tracks the currently open data point
-        # self._ml_model = None  # Cached loaded model (loaded once on first prediction)
-        # self._ml_scaler = None  # Cached loaded scaler (loaded once on first prediction)
+        # Variables used for ML calculations
+        self.ml_mode = getattr(type(self), 'ml_mode', 'gather')
+        self._ml_data_points = []
+        self._current_ml_point = None
+        self._ml_model = None
+        self._ml_scaler = None
+        self._ml_feature_importance = None
 
         self._is_executing = False
         self._is_initiated = False
@@ -87,212 +90,235 @@ class Strategy(ABC):
     def candles_pipeline(self) -> Optional[BaseCandlesPipeline]:
         return None
 
-    # def record_features(self, features_dict: dict) -> None:
-    #     """
-    #     Record multiple features (inputs) for ML training at once.
-    #     These will be the independent variables used to predict outcomes.
+    def record_features(self, features_dict: dict) -> None:
+        """
+        Record multiple features (inputs) for ML training at once.
+        These will be the independent variables used to predict outcomes.
 
-    #     Args:
-    #         features_dict: Dictionary of {feature_name: value} pairs
-    #                       (e.g., {'rsi_value': 50, 'macd_crossover': True})
-    #     """
-    #     # If we don't have an open data point, create one
-    #     if self._current_ml_point is None:
-    #         current_time = int(self.current_candle[0] / 1000)
-    #         self._current_ml_point = {
-    #             'time': current_time,
-    #             'features': {},
-    #             'label': None  # Will be set later when trade completes
-    #         }
+        Args:
+            features_dict: Dictionary of {feature_name: value} pairs
+                          (e.g., {'rsi_value': 50, 'macd_crossover': True})
+        """
+        # If we don't have an open data point, create one
+        if self._current_ml_point is None:
+            current_time = int(self.current_candle[0] / 1000)
+            self._current_ml_point = {
+                'time': current_time,
+                'features': {},
+                'label': None  # Will be set later when trade completes
+            }
 
-    #     # Add all features to this data point at once
-    #     self._current_ml_point['features'].update(features_dict)
+        # Add all features to this data point at once
+        self._current_ml_point['features'].update(features_dict)
 
-    # def record_label(self, name: str, value) -> None:
-    #     """
-    #     Record a label (output) for ML training.
-    #     These are the target variables that the model should predict.
+    def record_label(self, name: str, value) -> None:
+        """
+        Record a label (output) for ML training.
+        These are the target variables that the model should predict.
 
-    #     Args:
-    #         name: Descriptive name of the label (e.g., 'trade_profit', 'win_loss')
-    #         value: The actual outcome value
-    #     """
-    #     # Set the label for the current open data point
-    #     if self._current_ml_point is not None:
-    #         self._current_ml_point['label'] = {
-    #             'name': name,
-    #             'value': value
-    #         }
+        Args:
+            name: Descriptive name of the label (e.g., 'trade_profit', 'win_loss')
+            value: The actual outcome value
+        """
+        # Set the label for the current open data point
+        if self._current_ml_point is not None:
+            self._current_ml_point['label'] = {
+                'name': name,
+                'value': value 
+            }
 
-    #         # Move this completed data point to our storage and clear the current point
-    #         self._ml_data_points.append(self._current_ml_point)
-    #         self._current_ml_point = None
-    #     else:
-    #         jh.debug(f"record_label('{name}') called with no open data point — did you forget to call record_features() first?")
+            # Move this completed data point to our storage and clear the current point
+            self._ml_data_points.append(self._current_ml_point)
+            self._current_ml_point = None
+        else:
+            jh.debug(f"record_label('{name}') called with no open data point — did you forget to call record_features() first?")
 
-    # def export_ml_data(self, directory: str = None) -> bool:
-    #     """
-    #     Export all recorded features and labels to CSV files.
-    #     Returns True if export was successful, False otherwise.
+    def export_ml_data(self, directory: str | None = None) -> bool:
+        """
+        Export all recorded features and labels to CSV files.
+        Returns True if export was successful, False otherwise.
 
-    #     Args:
-    #         directory: Optional output directory. Defaults to strategy location.
-    #     """
-    #     import os
-    #     import sys
-    #     import csv
+        Args:
+            directory: Optional output directory. Defaults to strategy location.
+        """
+        try:
+            # Determine output directory
+            if directory is None:
+                try:
+                    module = sys.modules[self.__class__.__module__]
+                    directory = os.path.dirname(os.path.abspath(module.__file__))
+                except Exception as e:
+                    jh.debug(f"Could not determine strategy path, using cwd: {e}")
+                    directory = os.getcwd()
 
-    #     try:
-    #         # Determine output directory
-    #         if directory is None:
-    #             try:
-    #                 module = sys.modules[self.__class__.__module__]
-    #                 directory = os.path.dirname(os.path.abspath(module.__file__))
-    #             except Exception as e:
-    #                 jh.debug(f"Could not determine strategy path, using cwd: {e}")
-    #                 directory = os.getcwd()
+            # Create ml_data subdirectory
+            try:
+                ml_dir = os.path.join(directory, "ml_data")
+                os.makedirs(ml_dir, exist_ok=True)
+            except Exception as e:
+                jh.debug(f"Failed to create ml_data directory: {e}")
+                return False
 
-    #         # Create ml_data subdirectory
-    #         try:
-    #             ml_dir = os.path.join(directory, "ml_data")
-    #             os.makedirs(ml_dir, exist_ok=True)
-    #         except Exception as e:
-    #             jh.debug(f"Failed to create ml_data directory: {e}")
-    #             return False
+            # Export data points
+            if self._ml_data_points:
+                try:
+                    data_path = os.path.join(ml_dir, f"{self.name}_data.csv")
+                    with open(data_path, 'w', newline='') as f:
+                        writer = csv.writer(f)
 
-    #         # Export data points
-    #         if self._ml_data_points:
-    #             try:
-    #                 data_path = os.path.join(ml_dir, f"{self.name}_data.csv")
-    #                 with open(data_path, 'w', newline='') as f:
-    #                     writer = csv.writer(f)
+                        # Write header: time, label_name, label_value, feature1, feature2, ...
+                        headers = ['time', 'label_name', 'label_value']
+                        # Get all unique feature names across all data points
+                        all_features = set()
+                        for point in self._ml_data_points:
+                            all_features.update(point['features'].keys())
+                        headers.extend(sorted(all_features))
 
-    #                     # Write header: time, label_name, label_value, feature1, feature2, ...
-    #                     headers = ['time', 'label_name', 'label_value']
-    #                     # Get all unique feature names across all data points
-    #                     all_features = set()
-    #                     for point in self._ml_data_points:
-    #                         all_features.update(point['features'].keys())
-    #                     headers.extend(sorted(all_features))
+                        writer.writerow(headers)
 
-    #                     writer.writerow(headers)
+                        # Write data rows
+                        for point in self._ml_data_points:
+                            if point['label'] is None:
+                                continue  # Skip points without labels
 
-    #                     # Write data rows
-    #                     for point in self._ml_data_points:
-    #                         if point['label'] is None:
-    #                             continue  # Skip points without labels
+                            row = [
+                                point['time'],
+                                point['label']['name'],
+                                str(point['label']['value'])
+                            ]
 
-    #                         row = [
-    #                             point['time'],
-    #                             point['label']['name'],
-    #                             str(point['label']['value'])
-    #                         ]
+                            # Add all feature values (in consistent order)
+                            for feature_name in sorted(all_features):
+                                row.append(str(point['features'].get(feature_name, '')))
 
-    #                         # Add all feature values (in consistent order)
-    #                         for feature_name in sorted(all_features):
-    #                             row.append(str(point['features'].get(feature_name, '')))
+                            writer.writerow(row)
 
-    #                         writer.writerow(row)
+                except Exception as e:
+                    jh.debug(f"Failed to export ML data: {e}")
+                    return False
 
-    #             except Exception as e:
-    #                 jh.debug(f"Failed to export ML data: {e}")
-    #                 return False
+            return True
 
-    #         return True
+        except Exception as e:
+            jh.debug(f"Unexpected error during ML data export: {e}")
+            return False
 
-    #     except Exception as e:
-    #         jh.debug(f"Unexpected error during ML data export: {e}")
-    #         return False
+    def _load_ml_artifacts(self) -> None:
+        """
+        Load the model, scaler, and (if present) feature importance from the
+        strategy's own directory and cache them on the instance.
 
-    # def get_ml_prediction(self) -> dict:
-    #     """
-    #     Get ML prediction using the most recently recorded features.
+        After this call:
+            ``self._ml_model``              – fitted estimator
+            ``self._ml_scaler``             – fitted StandardScaler
+            ``self._ml_feature_importance`` – feature importance dict (or None)
 
-    #     Returns:
-    #         Dictionary containing:
-    #         - 'prediction': bool (True/False prediction)
-    #         - 'probability': float (0-1 probability of positive class)
+        The method is idempotent: if the model is already loaded it returns
+        immediately, so it is safe to call internally on every bar without
+        any extra guard.
+        """
+        if self._ml_model is not None:
+            return
 
-    #     Raises:
-    #         ValueError: If no features have been recorded or model not trained
-    #         FileNotFoundError: If model files are missing (with detailed path info)
-    #     """
-    #     import joblib
-    #     import numpy as np
-    #     import os
-    #     import sys
+        try:
+            module = sys.modules[self.__class__.__module__]
+            strategy_dir = os.path.dirname(os.path.abspath(module.__file__))
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Could not determine strategy directory from module '{self.__class__.__module__}': {e}"
+            )
 
-    #     # Check if we have features to predict with
-    #     if self._current_ml_point is None or not self._current_ml_point['features']:
-    #         raise ValueError("No features recorded for prediction. Call record_features() first.")
+        artefacts = _load_ml_model(strategy_dir)
+        self._ml_model              = artefacts["model"]
+        self._ml_scaler             = artefacts["scaler"]
+        self._ml_feature_importance = artefacts.get("feature_importance")
 
-    #     # Resolve strategy directory reliably via the module registry
-    #     try:
-    #         module = sys.modules[self.__class__.__module__]
-    #         strategy_dir = os.path.dirname(os.path.abspath(module.__file__))
-    #     except Exception as e:
-    #         raise FileNotFoundError(
-    #             f"Could not determine strategy directory from module '{self.__class__.__module__}': {e}"
-    #         )
+    def ml_features(self) -> dict:
+        """
+        Override this method to define the features used for both ML data gathering
+        and inference. It is the single source of truth for feature computation —
+        define it once and the framework uses it in both gather mode (via
+        ``record_features``) and deploy mode (via ``ml_predict`` /
+        ``ml_predict_proba``).
 
-    #     # Load model and scaler once and cache them for the lifetime of this strategy instance
-    #     if self._ml_model is None or self._ml_scaler is None:
-    #         model_path = os.path.join(strategy_dir, "svm_model.pkl")
-    #         scaler_path = os.path.join(strategy_dir, "scaler.pkl")
+        Called automatically by ``ml_predict()`` and ``ml_predict_proba()``.
 
-    #         # Check what files actually exist (for helpful error messages)
-    #         existing_files = [f for f in os.listdir(strategy_dir) if not f.startswith('.')]
-    #         jh.debug(f"[ML] Loading model from: {strategy_dir}")
+        Returns:
+            dict: ``{feature_name: value}`` pairs. All values should be normalised
+                  (ratios, z-scores, log-returns) so the model generalises across
+                  different price regimes.
 
-    #         if not os.path.exists(model_path):
-    #             raise FileNotFoundError(
-    #                 f"Model file NOT FOUND at: {model_path}\n"
-    #                 f"Current directory: {os.getcwd()}\n"
-    #                 f"Files in strategy dir ({strategy_dir}): {existing_files}"
-    #             )
-    #         if not os.path.exists(scaler_path):
-    #             raise FileNotFoundError(
-    #                 f"Scaler file NOT FOUND at: {scaler_path}\n"
-    #                 f"Current directory: {os.getcwd()}\n"
-    #                 f"Files in strategy dir ({strategy_dir}): {existing_files}"
-    #             )
+        Example::
 
-    #         try:
-    #             self._ml_model = joblib.load(model_path)
-    #             self._ml_scaler = joblib.load(scaler_path)
-    #             jh.debug("[ML] Model and scaler loaded and cached successfully")
-    #         except Exception as e:
-    #             raise FileNotFoundError(
-    #                 f"Failed to load model files from {strategy_dir}\n"
-    #                 f"Error: {str(e)}\n"
-    #                 f"Files in directory ({strategy_dir}): {existing_files}"
-    #             )
+            def ml_features(self) -> dict:
+                import jesse.indicators as ta
+                atr   = ta.atr(self.candles) + 1e-9
+                price = self.price
+                return {
+                    "rsi_centered":    (ta.rsi(self.candles) - 50) / 50,
+                    "atr_pct":         atr / price,
+                    "ema9_dist":       (price - ta.ema(self.candles, 9))
+                                       / (ta.ema(self.candles, 9) + 1e-9),
+                    "supertrend_dist": (price - ta.supertrend(self.candles).trend) / atr,
+                }
+        """
+        raise NotImplementedError(
+            "Override ml_features() in your strategy to define ML features. "
+            "Return a dict of {feature_name: value} pairs."
+        )
 
-    #     svm_model = self._ml_model
-    #     scaler = self._ml_scaler
+    def ml_predict(self) -> float:
+        """
+        For **regression** models. Loads the model lazily (idempotent), builds
+        features by calling ``self.ml_features()``, scales them with the fitted
+        scaler, and returns the scalar prediction.
 
-    #     # Get current features
-    #     current_features = self._current_ml_point['features']
+        You do not need to load the model manually — it is handled
+        internally. You also never need to touch ``self._ml_scaler`` or
+        ``self._ml_model`` directly.
 
-    #     # Create feature array from current features
-    #     # We'll use the same order as when training (alphabetical)
-    #     sorted_features = sorted(current_features.keys())
-    #     feature_array = np.array([
-    #         current_features[feature] for feature in sorted_features
-    #     ]).reshape(1, -1)
+        Returns:
+            float: The model's scalar prediction (e.g. an expected log-return).
 
-    #     # Scale and predict
-    #     try:
-    #         feature_array_scaled = scaler.transform(feature_array)
-    #         prediction = svm_model.predict(feature_array_scaled)[0]
-    #         probabilities = svm_model.predict_proba(feature_array_scaled)[0]
+        Raises:
+            NotImplementedError: If ``ml_features()`` has not been overridden.
+            FileNotFoundError:   If ``model.pkl`` / ``scaler.pkl`` are missing.
+        """
+        self._load_ml_artifacts()
+        feats = self.ml_features()
+        keys  = sorted(feats.keys())
+        X     = np.array([[feats[k] for k in keys]])
+        return float(self._ml_model.predict(self._ml_scaler.transform(X))[0])
 
-    #         return {
-    #             'prediction': bool(prediction),
-    #             'probability': float(probabilities[1])
-    #         }
-    #     except Exception as e:
-    #         raise ValueError(f"Prediction failed: {e}. Check feature consistency with training data.")
+    def ml_predict_proba(self) -> dict:
+        """
+        For **classification** models (binary or multiclass). Loads the model
+        lazily (idempotent), builds features by calling ``self.ml_features()``,
+        scales them, and returns a probability dict keyed by class label.
+
+        You do not need to load the model manually — it is handled
+        internally. You also never need to touch ``self._ml_scaler`` or
+        ``self._ml_model`` directly.
+
+        Returns:
+            dict: ``{class_label: probability}`` mapping.
+
+            - Binary model   → ``{0: float, 1: float}``
+            - Multiclass model → e.g. ``{-1: float, 0: float, 1: float}``
+
+            Use ``.get(1, 0.0)`` to safely retrieve the probability of a
+            specific class without risking a ``KeyError``.
+
+        Raises:
+            NotImplementedError: If ``ml_features()`` has not been overridden.
+            FileNotFoundError:   If ``model.pkl`` / ``scaler.pkl`` are missing.
+        """
+        self._load_ml_artifacts()
+        feats = self.ml_features()
+        keys  = sorted(feats.keys())
+        X     = np.array([[feats[k] for k in keys]])
+        probs = self._ml_model.predict_proba(self._ml_scaler.transform(X))[0]
+        return {int(cls): float(p) for cls, p in zip(self._ml_model.classes_, probs)}
 
     def add_line_to_candle_chart(self, title: str, value: float, color=None) -> None:
         # validate value's type
