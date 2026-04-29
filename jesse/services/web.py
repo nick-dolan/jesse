@@ -35,6 +35,7 @@ class BacktestRequestJson(BaseModel):
     export_tradingview: bool
     fast_mode: bool
     benchmark: bool
+    theme: str = 'light'
 
 
 class OptimizationRequestJson(BaseModel):
@@ -332,3 +333,45 @@ class GetTradesHistoryRequestJson(BaseModel):
 
 class ImportApiKeyRequestJson(BaseModel):
     content: str
+
+
+class SignificanceTestRequestJson(BaseModel):
+    id: Optional[str] = None
+    exchange: str
+    routes: List[Dict[str, str]]
+    data_routes: List[Dict[str, str]]
+    config: dict
+    start_date: str
+    finish_date: str
+    n_simulations: int = 1000
+    random_seed: Optional[int] = None
+    theme: str = 'light'
+    state: dict = {}
+
+
+class CancelSignificanceTestRequestJson(BaseModel):
+    id: str
+
+
+class TerminateSignificanceTestRequestJson(BaseModel):
+    id: str
+
+
+class UpdateSignificanceTestSessionStateRequestJson(BaseModel):
+    id: str
+    state: dict
+
+
+class UpdateSignificanceTestSessionNotesRequestJson(BaseModel):
+    id: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    strategy_codes: Optional[dict] = None
+
+
+class GetSignificanceTestSessionsRequestJson(BaseModel):
+    limit: int = 50
+    offset: int = 0
+    title_search: Optional[str] = None
+    status_filter: Optional[str] = None
+    date_filter: Optional[str] = None
