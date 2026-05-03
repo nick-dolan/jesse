@@ -158,6 +158,11 @@ class DeleteStrategyRequestJson(BaseModel):
     name: str
 
 
+class ForkStrategyRequestJson(BaseModel):
+    new_name: str
+    content: str
+
+
 class ImportStrategyRequestJson(BaseModel):
     slug: str
 
@@ -183,6 +188,10 @@ class HelpSearchRequestJson(BaseModel):
 class DeleteCandlesRequestJson(BaseModel):
     exchange: str
     symbol: str
+
+
+class PurgeCandlesRequestJson(BaseModel):
+    exchanges: List[str]
 
 
 class UpdateOptimizationSessionStateRequestJson(BaseModel):

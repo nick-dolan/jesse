@@ -200,11 +200,17 @@ def _plot_backtest_charts(session_id: str, charts_folder: str, theme: str = 'lig
     if benchmark:
         initial_balance = daily_balance[0]
         bench_colors = t['benchmark_colors']
+        # Use store.app.ending_time directly (no +24h). ending_time is just ~1 minute
+        # past the last simulated candle, so floor(ending_time) - 1 min lands exactly
+        # on the last candle timestamp that exists in the DB. Adding 24h previously
+        # caused the fetch to request a finish date one full day beyond the last DB
+        # candle, which always raised CandleNotFoundInDatabase.
+        benchmark_finish = store.app.ending_time
         for i, r in enumerate(router.routes):
             try:
                 _, daily_candles = get_candles_from_db(
                     r.exchange, r.symbol, '1D', store.app.starting_time,
-                    store.app.ending_time + 1000 * 60 * 60 * 24,
+                    benchmark_finish,
                     is_for_jesse=False, warmup_candles_num=0, caching=True
                 )
                 daily_returns = prices_to_returns(daily_candles[:, 2])
@@ -215,8 +221,9 @@ def _plot_backtest_charts(session_id: str, charts_folder: str, theme: str = 'lig
                 color = bench_colors[i % len(bench_colors)]
                 bench_series.append((r.symbol, color, bench_dates, bench_balance, bench_multiplier))
                 ax.plot(bench_dates, bench_balance, color=color, linewidth=1.2, linestyle='--', label=r.symbol)
-            except Exception:
-                pass
+            except Exception as e:
+                import jesse.helpers as jh
+                jh.error(f'Could not generate benchmark chart for {r.symbol}: {e}')
 
     ax.set_ylabel('Balance', color=t['text_color'])
     ax.set_xlabel('Date', color=t['text_color'])
@@ -360,7 +367,12 @@ def _plot_backtest_charts(session_id: str, charts_folder: str, theme: str = 'lig
         ax.set_facecolor(t['axes_facecolor'])
 
         masked = np.ma.masked_invalid(grid)
-        abs_max = max(10, float(np.nanmax(np.abs(grid[~np.isnan(grid)]))) if not np.all(np.isnan(grid)) else 10)
+        # Compute the colour scale from monthly columns only (0-11).
+        # Including the Total column (12) skews abs_max far too high (e.g. 143% annual
+        # return) which compresses every monthly value toward yellow and makes negative
+        # months look green instead of red.
+        monthly_grid = grid[:, :12]
+        abs_max = max(10, float(np.nanmax(np.abs(monthly_grid[~np.isnan(monthly_grid)]))) if not np.all(np.isnan(monthly_grid)) else 10)
         norm = TwoSlopeNorm(vmin=-abs_max, vcenter=0, vmax=abs_max)
         nan_color = t['axes_facecolor']
         cmap_copy = plt.cm.get_cmap('RdYlGn').copy()
@@ -547,10 +559,12 @@ def equity_curve(benchmark: bool = False) -> list:
 
     if benchmark:
         initial_balance = daily_balance[0]
+        # Use store.app.ending_time directly — same reasoning as _plot_backtest_charts above.
+        benchmark_finish = store.app.ending_time
         for i, r in enumerate(router.routes):
             _, daily_candles = get_candles_from_db(
                 r.exchange, r.symbol, '1D', store.app.starting_time,
-                store.app.ending_time + 1000 * 60 * 60 * 24, is_for_jesse=False, warmup_candles_num=0, caching=True
+                benchmark_finish, is_for_jesse=False, warmup_candles_num=0, caching=True
             )
             daily_returns = prices_to_returns(daily_candles[:, 2])
             daily_returns[0] = 0
